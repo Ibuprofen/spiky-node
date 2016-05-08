@@ -63,10 +63,6 @@ void loop() {
     Serial.println(c);
     avail = avail - 1;
   }
-
-
-
-
 }
 
 
@@ -83,7 +79,7 @@ void printDirectory(File dir, int numTabs) {
   while (true) {
 
     File entry =  dir.openNextFile();
-    if (! entry) {
+    if (!entry) {
       Serial.println("No more files. rewinding.");
       //dir.rewindDirectory();
       // no more files
@@ -100,7 +96,26 @@ void printDirectory(File dir, int numTabs) {
       // files have sizes, directories do not
       Serial.print("\t\t");
       Serial.println(entry.size(), DEC);
+      // re-open the file for reading:
+      //myFile = SD.open(entry.name());
+      if (entry) {
+
+        // read from the file until there's nothing else in it:
+        while (entry.available()) {
+          //Serial1.write(entry.read());
+          entry.read();
+          yield(); // prevent wdt
+        }
+        // close the file:
+        entry.close();
+        Serial.println("File read. Delaying...");
+      } else {
+        // if the file didn't open, print an error:
+        Serial.println("error opening file");
+      }
+
+
     }
-    entry.close();
+    //entry.close();
   }
 }
