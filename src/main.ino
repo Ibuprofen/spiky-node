@@ -4,6 +4,8 @@
 
 #include "Secrets.h"
 
+#define DEBUG true
+
 /* Soft AP network parameters */
 IPAddress apIP(192, 168, 5, 1);
 IPAddress netMsk(255, 255, 255, 0);
@@ -17,17 +19,23 @@ WiFiUDP UDP;
 #define UDP_PORT 8888
 
 // LED
-const double BRIGHTNESS = 0.1;//1.0;
+const double BRIGHTNESS = 0.5;//1.0;
 #define NUM_LEDS     30  // maximum LED node number we can receive
-#define NUM_NODES NUM_LEDS
-uint8_t incoming_leds[NUM_LEDS * 3] = {0};
+// 10W nodes do not have a zero address
+#define BEGIN_LED 1
+uint8_t incoming_leds[(NUM_LEDS + BEGIN_LED) * 3] = {0};
 uint8_t incoming_state = 0; // 0=none, 1=node
 uint8_t incoming_index = 0;
 uint8_t incoming_led;
 uint8_t incoming_red;
 uint8_t incoming_green;
 uint8_t incoming_blue;
-uint8_t outgoing_leds[NUM_LEDS * 3] = {0};
+uint8_t outgoing_leds[NUM_LEDS*3] = {0};
+int avail = 0;
+
+// use this to calibrate when re-assembled
+//uint8_t led_map[NUM_LEDS] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19};
+uint8_t led_map[NUM_LEDS] =   {10, 9,20,16,17,18, 7, 6, 8,13, 4,11, 3,12,15, 1,14, 5,19, 2};
 
 // fallback animation
 unsigned long lastHeardDataAt = millis();
@@ -46,6 +54,16 @@ void startFrame();
 void fadeNext();
 void setLedColorHSV(int h, double s, double v);
 void setColor(int r, int g, int b);
+
+#ifdef DEBUG
+ #define DP(x)  Serial.print(x)
+ #define DPL(x)  Serial.println(x)
+ #define DPLD(x,y)  Serial.println(x,y)
+#else
+ #define DP(x)
+ #define DPL(x)
+ #define DPLD(x,y)
+#endif
 
 // string to lowercase
 char *strlwr(char *str)
@@ -107,12 +125,33 @@ void setup() {
     Serial.println("initialization done.");
   }
 
-  //printRoot();
+  printRoot();
+}
+
+// copy data from incoming_leds[] to outgoing_leds[]
+// this code determines which LEDs are mapped to Serial1
+// remember, the 10W leds begin at position 1! our arrays are 0 indexed
+// basically, the address written on the led is a lie, if it says 1, the bits
+// have it at position 0. organize the outgoing data accordingly
+void reorder_nodes_serial1(void)
+{
+  // zero the array
+  memset(outgoing_leds, 0, sizeof(outgoing_leds));
+
+  for (int i=0; i < NUM_LEDS; i++) {
+
+    if (led_map[i] > 0) {
+      outgoing_leds[(led_map[i] - BEGIN_LED)*3+0] = int(incoming_leds[i*3+0] * BRIGHTNESS);
+      outgoing_leds[(led_map[i] - BEGIN_LED)*3+1] = int(incoming_leds[i*3+1] * BRIGHTNESS);
+      outgoing_leds[(led_map[i] - BEGIN_LED)*3+2] = int(incoming_leds[i*3+2] * BRIGHTNESS);
+    }
+
+  }
 }
 
 void loop() {
 
-  int avail = UDP.parsePacket();
+  avail = UDP.parsePacket();
   while (avail > 0) {
 
     lastHeardDataAt = millis();
@@ -126,7 +165,8 @@ void loop() {
 
       startFrame();
 
-      memcpy(outgoing_leds, incoming_leds, sizeof(incoming_leds));
+      reorder_nodes_serial1();
+      //memcpy(outgoing_leds, incoming_leds, sizeof(incoming_leds));
 
       Serial1.write(outgoing_leds, sizeof(outgoing_leds));
 
@@ -212,7 +252,7 @@ void printDirectory(File dir) {
 
 void readFile(File* file) {
 
-  Serial.print(file->name());
+  DP(file->name());
 
   if (file && !file->isDirectory()) {
 
@@ -223,17 +263,31 @@ void readFile(File* file) {
     }
 
     // files have sizes, directories do not
-    Serial.print("\t\t");
-    Serial.println(file->size(), DEC);
+    DP("\t\t");
+    DPLD(file->size(), DEC);
 
     size_t n;      // Length of returned field with delimiter.
     char str[5];  // Must hold longest field with delimiter and zero byte.
-    uint8_t frame[NUM_NODES * 3] = {0}; // r, g, b
-    int column = 0;
-    bool eol = false; // end of line
+//    uint8_t frame[NUM_LEDS * 3] = {0}; // r, g, b
 
-    // Read the file and print fields.
+    // timing
+    unsigned long lastFrameSentAt = 0;
+    long diff = 0;
+
+    // row and column can both be thought of as starting from 1!
+    int row = 1;
+    int column = 0;
+    bool eol = false;
+    int frameDuration = 0;
+    int actualDuration = 0;
+    int framesPerLoop = 0;
+    int iterations = 0;
+
+    // get the file meta
     while (true) {
+      // we have it, gtfo
+      if (framesPerLoop > 0 && frameDuration > 0) break;
+
       n = readField(file, str, sizeof(str), ",\n");
 
       // done if Error or at EOF.
@@ -241,11 +295,8 @@ void readFile(File* file) {
 
       // Print the type of delimiter.
       if (str[n-1] == ',' || str[n-1] == '\n') {
-        ////Serial.print(str[n-1] == ',' ? F("comma: ") : F("endl:  "));
 
-        if (str[n-1] == '\n') {
-          eol = true;
-        }
+        column++;
 
         // Remove the delimiter.
         str[n-1] = 0;
@@ -254,33 +305,122 @@ void readFile(File* file) {
         //Serial.print(file->available() ? F("error: ") : F("eof:   "));
       }
 
-      // Print the field.
-      /*//Serial.print(str);
-      //Serial.print("\t");
-      //Serial.println(atoi(str));*/
-
-      frame[column] = atoi(str);
-
-      // frame is complete
-      if (eol) {
-
-        // send frame
-        startFrame();
-        Serial1.write(frame, sizeof(frame));
-        Serial1.flush();
-
-        delay(10);
-
-        eol = false;
-        column = 0;
-      } else {
-        column++;
+      // first row, first column is number of frames per loop
+      if (row == 1 && column == 1) {
+        framesPerLoop = atoi(str);
+        DP("framesPerLoop: ");
+        DPL(framesPerLoop);
+      // first row, second column is # of microseconds to show frame
+      } else if (row == 1 && column == 2) {
+        frameDuration = atoi(str);
+        DP("frameDuration: ");
+        DPL(frameDuration);
       }
 
     }
 
+    // leftmost integer is number of seconds to loop.
+    // realistically this isn't totally accurate and is probably actually double
+    // the number of seconds to reality
+    iterations = 60 * 1000 / (frameDuration * framesPerLoop);
+
+    DP("iterations: ");
+    DPL(iterations);
+
+    // todo, figure out the number of iterations
+    for (int i = 0; i < iterations; i++) {
+
+      //Serial.print("loop: ");
+      //Serial.println(i);
+
+      row = 1;
+      column = 0;
+      eol = false;
+      str[5] = {0};
+      file->seek(0);
+
+      // Read the file and print fields.
+      while (true) {
+        n = readField(file, str, sizeof(str), ",\n");
+
+        // done if Error or at EOF.
+        if (n == 0) break;
+
+        // Print the type of delimiter.
+        if (str[n-1] == ',' || str[n-1] == '\n') {
+          ////Serial.print(str[n-1] == ',' ? F("comma: ") : F("endl:  "));
+
+          if (str[n-1] == '\n') {
+            eol = true;
+          }
+          column++;
+
+          // Remove the delimiter.
+          str[n-1] = 0;
+        } else {
+          // At eof, too long, or read error.  Too long is error.
+          //Serial.print(file->available() ? F("error: ") : F("eof:   "));
+        }
+
+
+        // Print the field.
+        /*//Serial.print(str);
+        //Serial.print("\t");
+        //Serial.println(atoi(str));*/
+
+        if (row > 1) {
+          incoming_leds[column-1] = atoi(str);
+        }
+
+        // dont send the meta row
+        if (row > 1 && eol) {
+
+          // do some math to match up the desired frame rate
+          if (lastFrameSentAt > 0) {
+            diff = frameDuration - (millis() - lastFrameSentAt);
+
+            if (diff > 0) {
+              actualDuration = abs(diff);
+            } else {
+              actualDuration = 0;
+              //Serial.print("NEGATIVE DIFF: ");
+              //Serial.println(diff);
+            }
+
+          }
+
+          lastFrameSentAt = millis();
+
+          // send frame
+          startFrame();
+          reorder_nodes_serial1();
+          Serial1.write(outgoing_leds, sizeof(outgoing_leds));
+          Serial1.flush();
+
+          //Serial.print(frameDuration); Serial.print(" : ");
+          //Serial.println(actualDuration);
+          delay(actualDuration);
+
+        }
+
+        if (eol) {
+          row++;
+          eol = false;
+          column = 0;
+        }
+
+        // TODO: check for serial, break out of while
+        // dont forget to close the file
+
+      }
+
+      // TODO: do we leave this????
+      yield();
+      // TODO: check for serial, break out of iterations
+      // dont forget to close the file
+    }
+
     //Serial.println("File read complete.");
-    yield();
   }
 
 }
