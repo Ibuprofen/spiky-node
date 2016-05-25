@@ -1,5 +1,7 @@
 #include <ESP8266WiFi.h>
-#include <WiFiUDP.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 #include <SD.h>
 
 #include "Secrets.h"
@@ -19,14 +21,10 @@ WiFiUDP UDP;
 #define UDP_PORT 8888
 
 // LED
-const double BRIGHTNESS = 0.8;//1.0;
+const double BRIGHTNESS = 0.5;//1.0;
 #define NUM_LEDS     30  // maximum LED node number we can receive
 // 10W nodes do not have a zero address
 #define BEGIN_LED 1
-// duration to (approx) run an sd card animation for
-#define ANIMATIONDURATION 60
-// wait this long for udp packets before fallback
-#define SILENCETIMEOUT 10
 uint8_t incoming_leds[(NUM_LEDS + BEGIN_LED) * 3] = {0};
 uint8_t incoming_state = 0; // 0=none, 1=node
 uint8_t incoming_index = 0;
@@ -35,10 +33,10 @@ uint8_t incoming_red;
 uint8_t incoming_green;
 uint8_t incoming_blue;
 uint8_t outgoing_leds[NUM_LEDS*3] = {0};
-int udpAvail = 0;
+int avail = 0;
 
 // use this to calibrate when re-assembled
-//uint8_t led_map[NUM_LEDS] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19};
+//uint8_t led_map[NUM_LEDS] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19};
 uint8_t led_map[NUM_LEDS] =   {10, 9,20,16,17,18, 7, 6, 8,13, 4,11, 3,12,15, 1,14, 5,19, 2};
 
 // fallback animation
@@ -46,12 +44,11 @@ unsigned long lastHeardDataAt = millis();
 int globalHue = 0;
 
 // SD
-File dir;
-File file;
-bool sdAvail = false;
-int curFileNum = 0;
+File root;
 
 // func declarations
+void printRoot();
+void printDirectory(File dir);
 void readFile(File* file);
 size_t readField(File* file, char* str, size_t size, char* delim);
 bool isCSVFile(char* filename);
@@ -83,12 +80,43 @@ char *strlwr(char *str)
   return str;
 }
 
+void setupOTA() {
+  // Port defaults to 8266
+  // ArduinoOTA.setPort(8266);
+
+  // Hostname defaults to esp8266-[ChipID]
+  // ArduinoOTA.setHostname("myesp8266");
+
+  // No authentication by default
+  // ArduinoOTA.setPassword((const char *)"123");
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("Start");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+  ArduinoOTA.begin();
+}
+
+
 void setup() {
 
   Serial.begin(115200);
   Serial1.begin(115200);  // TX1 is GPIO2
 
-  delay(100); // iono
+  Serial.println("Booting");
 
   // WIFI Access Point  --------------------------------------------------------
   Serial.println();
@@ -112,7 +140,6 @@ void setup() {
   }
   Serial.println(MAC_char);
 
-
   // UDP  ----------------------------------------------------------------------
   while (!UDP.begin(UDP_PORT)) {
     delay(250);
@@ -122,18 +149,20 @@ void setup() {
   // SD
   Serial.print("Initializing SD card...");
 
-  sdAvail = SD.begin();
-
   // put the SD card on the HSPI pins D5-D8
-  if (!sdAvail) {
+  if (!SD.begin()) {
     Serial.println("initialization failed!");
     //return;
   } else {
-    dir = SD.open("/");
     Serial.println("initialization done.");
   }
 
+  setupOTA();
+
+  Serial.println("Ready");
 }
+
+
 
 // copy data from incoming_leds[] to outgoing_leds[]
 // this code determines which LEDs are mapped to Serial1
@@ -156,8 +185,10 @@ void reorder_nodes_serial1(void)
   }
 }
 
-void parseIncoming() {
-  while (udpAvail > 0) {
+void loop() {
+
+  avail = UDP.parsePacket();
+  while (avail > 0) {
 
     lastHeardDataAt = millis();
 
@@ -169,8 +200,12 @@ void parseIncoming() {
     } else if (c == '#') {
 
       startFrame();
+
       reorder_nodes_serial1();
+      //memcpy(outgoing_leds, incoming_leds, sizeof(incoming_leds));
+
       Serial1.write(outgoing_leds, sizeof(outgoing_leds));
+
       Serial1.flush();
 
       incoming_state = 0;
@@ -210,157 +245,88 @@ void parseIncoming() {
       }
     }
 
-    udpAvail = udpAvail - 1;
-  }
-}
-
-
-void loop() {
-
-
-  if (udpAvail) {
-    parseIncoming();
-  } else {
-    udpAvail = UDP.parsePacket();
+    avail = avail - 1;
   }
 
   // nothing heard in a while.. do SOMETHING
-  if (lastHeardDataAt + SILENCETIMEOUT * 1000 < millis()) {
-
-    if (sdAvail) {
-
-      readFileAnimation();
-
-    } else {
-
-      fadeNext();
-      delay(10);
-
-    }
-
+  if (lastHeardDataAt + 10 * 1000 < millis()) {
+    fadeNext();
+    delay(10);
   }
 
   // allow the ESP to do what it do
   yield();
+
+  // OTA goodness
+  ArduinoOTA.handle();
 }
 
-// returns the file number
-void readFileAnimation() {
 
-  file = dir.openNextFile();
-  if (!file) {
-    DPL("No more files. rewinding.");
-    dir.rewindDirectory();
+void printRoot() {
+  root = SD.open("/");
 
-    return;
+  printDirectory(root);
 
-  } else {
+  //Serial.println("done!");
+}
 
-    if (file && !file.isDirectory()) {
 
-      if ( !isCSVFile(file.name() ) ) {
+void printDirectory(File dir) {
+  while (true) {
 
-        DP("Not a CSV, skipping: ");
-        DPL(file.name());
-
-      } else {
-
-        readFile(&file);
-
-      }
-
+    File file = dir.openNextFile();
+    if (!file) {
+      Serial.println("No more files. rewinding.");
+      //dir.rewindDirectory();
+      // no more files
+      break;
+    } else {
+      readFile(&file);
+      //Serial.println("Closing file.");
+      file.close();
     }
-
-    file.close();
   }
 }
-
 
 
 void readFile(File* file) {
 
   DP(file->name());
-  // files have sizes, directories do not
-  DP("\t\t");
-  DPLD(file->size(), DEC);
 
-  size_t n;      // Length of returned field with delimiter.
-  char str[5];  // Must hold longest field with delimiter and zero byte.
+  if (file && !file->isDirectory()) {
 
-  // timing
-  unsigned long lastFrameSentAt = 0;
-  long diff = 0;
-
-  // row and column can both be thought of as starting from 1!
-  int row = 1;
-  int column = 0;
-  bool eol = false;
-  int frameDuration = 0;
-  int actualDuration = 0;
-  int framesPerLoop = 0;
-  int iterations = 0;
-
-  // get the file meta
-  while (true) {
-    // we have it, gtfo
-    if (framesPerLoop > 0 && frameDuration > 0) break;
-
-    n = readField(file, str, sizeof(str), ",\n");
-
-    // done if Error or at EOF.
-    if (n == 0) break;
-
-    // or UDP is incoming
-    if (udpAvail) break;
-
-    // Print the type of delimiter.
-    if (str[n-1] == ',' || str[n-1] == '\n') {
-
-      column++;
-
-      // Remove the delimiter.
-      str[n-1] = 0;
-    } else {
-      // At eof, too long, or read error.  Too long is error.
-      //Serial.print(file->available() ? F("error: ") : F("eof:   "));
+    if ( !isCSVFile(file->name() ) ) {
+      //Serial.print("Not a csv file: ");
+      //Serial.println(file->name());
+      return;
     }
 
-    // first row, first column is number of frames per loop
-    if (row == 1 && column == 1) {
-      framesPerLoop = atoi(str);
-      DP("framesPerLoop: ");
-      DPL(framesPerLoop);
-    // first row, second column is # of microseconds to show frame
-    } else if (row == 1 && column == 2) {
-      frameDuration = atoi(str);
-      DP("frameDuration: ");
-      DPL(frameDuration);
-    }
+    // files have sizes, directories do not
+    DP("\t\t");
+    DPLD(file->size(), DEC);
 
-  }
+    size_t n;      // Length of returned field with delimiter.
+    char str[5];  // Must hold longest field with delimiter and zero byte.
+//    uint8_t frame[NUM_LEDS * 3] = {0}; // r, g, b
 
-  // leftmost integer is number of seconds to loop.
-  // realistically this isn't totally accurate and is probably actually double
-  // the number of seconds to reality
-  iterations = ANIMATIONDURATION * 1000 / (frameDuration * framesPerLoop);
+    // timing
+    unsigned long lastFrameSentAt = 0;
+    long diff = 0;
 
-  DP("iterations: ");
-  DPL(iterations);
+    // row and column can both be thought of as starting from 1!
+    int row = 1;
+    int column = 0;
+    bool eol = false;
+    int frameDuration = 0;
+    int actualDuration = 0;
+    int framesPerLoop = 0;
+    int iterations = 0;
 
-  // todo, figure out the number of iterations
-  for (int i = 0; i < iterations; i++) {
-
-    //Serial.print("loop: ");
-    //Serial.println(i);
-
-    row = 1;
-    column = 0;
-    eol = false;
-    str[5] = {0};
-    file->seek(0);
-
-    // Read the file and print fields.
+    // get the file meta
     while (true) {
+      // we have it, gtfo
+      if (framesPerLoop > 0 && frameDuration > 0) break;
+
       n = readField(file, str, sizeof(str), ",\n");
 
       // done if Error or at EOF.
@@ -368,11 +334,7 @@ void readFile(File* file) {
 
       // Print the type of delimiter.
       if (str[n-1] == ',' || str[n-1] == '\n') {
-        ////Serial.print(str[n-1] == ',' ? F("comma: ") : F("endl:  "));
 
-        if (str[n-1] == '\n') {
-          eol = true;
-        }
         column++;
 
         // Remove the delimiter.
@@ -382,66 +344,124 @@ void readFile(File* file) {
         //Serial.print(file->available() ? F("error: ") : F("eof:   "));
       }
 
-
-      // Print the field.
-      /*//Serial.print(str);
-      //Serial.print("\t");
-      //Serial.println(atoi(str));*/
-
-      if (row > 1) {
-        incoming_leds[column-1] = atoi(str);
-      }
-
-      // dont send the meta row
-      if (row > 1 && eol) {
-
-        // do some math to match up the desired frame rate
-        if (lastFrameSentAt > 0) {
-          diff = frameDuration - (millis() - lastFrameSentAt);
-
-          if (diff > 0) {
-            actualDuration = abs(diff);
-          } else {
-            actualDuration = 0;
-            //Serial.print("NEGATIVE DIFF: ");
-            //Serial.println(diff);
-          }
-
-        }
-
-        lastFrameSentAt = millis();
-
-        // send frame
-        startFrame();
-        reorder_nodes_serial1();
-        Serial1.write(outgoing_leds, sizeof(outgoing_leds));
-        Serial1.flush();
-
-        //Serial.print(frameDuration); Serial.print(" : ");
-        //Serial.println(actualDuration);
-        delay(actualDuration);
-
-        // sent the frame, lets check for UDP packets
-        udpAvail = UDP.parsePacket();
-        if (udpAvail) break;
-
-      }
-
-      if (eol) {
-        row++;
-        eol = false;
-        column = 0;
+      // first row, first column is number of frames per loop
+      if (row == 1 && column == 1) {
+        framesPerLoop = atoi(str);
+        DP("framesPerLoop: ");
+        DPL(framesPerLoop);
+      // first row, second column is # of microseconds to show frame
+      } else if (row == 1 && column == 2) {
+        frameDuration = atoi(str);
+        DP("frameDuration: ");
+        DPL(frameDuration);
       }
 
     }
 
-    // ???
-    yield();
+    // leftmost integer is number of seconds to loop.
+    // realistically this isn't totally accurate and is probably actually double
+    // the number of seconds to reality
+    iterations = 60 * 1000 / (frameDuration * framesPerLoop);
 
-    // incoming UDP, gtfo
-    if (udpAvail) break;
+    DP("iterations: ");
+    DPL(iterations);
 
+    // todo, figure out the number of iterations
+    for (int i = 0; i < iterations; i++) {
+
+      //Serial.print("loop: ");
+      //Serial.println(i);
+
+      row = 1;
+      column = 0;
+      eol = false;
+      str[5] = {0};
+      file->seek(0);
+
+      // Read the file and print fields.
+      while (true) {
+        n = readField(file, str, sizeof(str), ",\n");
+
+        // done if Error or at EOF.
+        if (n == 0) break;
+
+        // Print the type of delimiter.
+        if (str[n-1] == ',' || str[n-1] == '\n') {
+          ////Serial.print(str[n-1] == ',' ? F("comma: ") : F("endl:  "));
+
+          if (str[n-1] == '\n') {
+            eol = true;
+          }
+          column++;
+
+          // Remove the delimiter.
+          str[n-1] = 0;
+        } else {
+          // At eof, too long, or read error.  Too long is error.
+          //Serial.print(file->available() ? F("error: ") : F("eof:   "));
+        }
+
+
+        // Print the field.
+        /*//Serial.print(str);
+        //Serial.print("\t");
+        //Serial.println(atoi(str));*/
+
+        if (row > 1) {
+          incoming_leds[column-1] = atoi(str);
+        }
+
+        // dont send the meta row
+        if (row > 1 && eol) {
+
+          // do some math to match up the desired frame rate
+          if (lastFrameSentAt > 0) {
+            diff = frameDuration - (millis() - lastFrameSentAt);
+
+            if (diff > 0) {
+              actualDuration = abs(diff);
+            } else {
+              actualDuration = 0;
+              //Serial.print("NEGATIVE DIFF: ");
+              //Serial.println(diff);
+            }
+
+          }
+
+          lastFrameSentAt = millis();
+
+          // send frame
+          startFrame();
+          reorder_nodes_serial1();
+          Serial1.write(outgoing_leds, sizeof(outgoing_leds));
+          Serial1.flush();
+
+          //Serial.print(frameDuration); Serial.print(" : ");
+          //Serial.println(actualDuration);
+          delay(actualDuration);
+
+        }
+
+        if (eol) {
+          row++;
+          eol = false;
+          column = 0;
+        }
+
+        // TODO: check for serial, break out of while
+        // dont forget to close the file
+
+      }
+
+      // TODO: do we leave this????
+      yield();
+      // TODO: check for serial, break out of iterations
+      // dont forget to close the file
+    }
+
+    //Serial.println("File read complete.");
   }
+
 }
 
 
