@@ -19,7 +19,7 @@ WiFiUDP UDP;
 #define UDP_PORT 8888
 
 // LED
-const double BRIGHTNESS = 0.8;//1.0;
+const double BRIGHTNESS = 1.0;//1.0;
 #define NUM_LEDS     30  // maximum LED node number we can receive
 // 10W nodes do not have a zero address
 #define BEGIN_LED 1
@@ -39,7 +39,7 @@ int udpAvail = 0;
 
 // use this to calibrate when re-assembled
 //uint8_t led_map[NUM_LEDS] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19};
-uint8_t led_map[NUM_LEDS] =   {10, 9,20,16,17,18, 7, 6, 8,13, 4,11, 3,12,15, 1,14, 5,19, 2};
+uint8_t led_map[NUM_LEDS] = {12,19, 0, 9,17, 4, 5,16, 7, 6, 1,11,15, 3,13, 8,10,14,18, 2};
 
 // fallback animation
 unsigned long lastHeardDataAt = millis();
